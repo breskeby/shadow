@@ -10,19 +10,17 @@ import com.github.jengelman.gradle.plugins.shadow.transformers.TransformerContex
 import groovy.util.logging.Slf4j
 import org.apache.commons.io.FilenameUtils
 import org.apache.commons.io.IOUtils
-import org.apache.tools.zip.UnixStat
-import org.apache.tools.zip.Zip64RequiredException
-import org.apache.tools.zip.ZipEntry
-import org.apache.tools.zip.ZipFile
-import org.apache.tools.zip.ZipOutputStream
+import org.apache.tools.zip.*
 import org.gradle.api.Action
 import org.gradle.api.GradleException
 import org.gradle.api.UncheckedIOException
 import org.gradle.api.file.FileCopyDetails
+import org.gradle.api.file.FilePermissions
 import org.gradle.api.file.FileTreeElement
 import org.gradle.api.file.RelativePath
 import org.gradle.api.internal.DocumentationRegistry
 import org.gradle.api.internal.file.CopyActionProcessingStreamAction
+import org.gradle.api.internal.file.DefaultFilePermissions
 import org.gradle.api.internal.file.DefaultFileTreeElement
 import org.gradle.api.internal.file.copy.CopyAction
 import org.gradle.api.internal.file.copy.CopyActionProcessingStream
@@ -33,11 +31,13 @@ import org.gradle.api.tasks.WorkResults
 import org.gradle.api.tasks.bundling.Zip
 import org.gradle.api.tasks.util.PatternSet
 import org.gradle.internal.UncheckedException
+import org.gradle.util.GradleVersion
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassVisitor
 import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.commons.ClassRemapper
 
+import java.util.function.Function
 import java.util.zip.ZipException
 
 @Slf4j
@@ -55,12 +55,15 @@ class ShadowCopyAction implements CopyAction {
     private final boolean preserveFileTimestamps
     private final boolean minimizeJar
     private final UnusedTracker unusedTracker
+    private final Function<FileCopyDetails, Integer> unixPermissionResolver
 
     ShadowCopyAction(File zipFile, ZipCompressor compressor, DocumentationRegistry documentationRegistry,
-                            String encoding, List<Transformer> transformers, List<Relocator> relocators,
-                            PatternSet patternSet, ShadowStats stats,
-                            boolean preserveFileTimestamps, boolean minimizeJar, UnusedTracker unusedTracker) {
+                     String encoding, List<Transformer> transformers, List<Relocator> relocators,
+                     PatternSet patternSet, ShadowStats stats,
+                     boolean preserveFileTimestamps, boolean minimizeJar, UnusedTracker unusedTracker,
+                     Function<FileCopyDetails, Integer> unixPermissionResolver) {
 
+        this.unixPermissionResolver = unixPermissionResolver
         this.zipFile = zipFile
         this.compressor = compressor
         this.documentationRegistry = documentationRegistry
@@ -148,7 +151,7 @@ class ShadowCopyAction implements CopyAction {
     private static <T extends Closeable> void withResource(T resource, Action<? super T> action) {
         try {
             action.execute(resource)
-        } catch(Throwable t) {
+        } catch (Throwable t) {
             try {
                 resource.close()
             } catch (IOException ignored) {
@@ -200,8 +203,8 @@ class ShadowCopyAction implements CopyAction {
         private Set<String> visitedFiles = new HashSet<String>()
 
         StreamAction(ZipOutputStream zipOutStr, String encoding, List<Transformer> transformers,
-                            List<Relocator> relocators, PatternSet patternSet, Set<String> unused,
-                            ShadowStats stats) {
+                     List<Relocator> relocators, PatternSet patternSet, Set<String> unused,
+                     ShadowStats stats) {
             this.zipOutStr = zipOutStr
             this.transformers = transformers
             this.relocators = relocators
@@ -209,7 +212,7 @@ class ShadowCopyAction implements CopyAction {
             this.patternSet = patternSet
             this.unused = unused
             this.stats = stats
-            if(encoding != null) {
+            if (encoding != null) {
                 this.zipOutStr.setEncoding(encoding)
             }
         }
@@ -228,7 +231,7 @@ class ShadowCopyAction implements CopyAction {
                             String mappedPath = remapper.map(fileDetails.relativePath.pathString)
                             ZipEntry archiveEntry = new ZipEntry(mappedPath)
                             archiveEntry.setTime(getArchiveTimeFor(fileDetails.lastModified))
-                            archiveEntry.unixMode = (UnixStat.FILE_FLAG | fileDetails.mode)
+                            archiveEntry.unixMode = (UnixStat.FILE_FLAG | unixPermissionResolver.apply(fileDetails))
                             zipOutStr.putNextEntry(archiveEntry)
                             fileDetails.copyTo(zipOutStr)
                             zipOutStr.closeEntry()
@@ -252,7 +255,7 @@ class ShadowCopyAction implements CopyAction {
             ZipFile archive = new ZipFile(fileDetails.file)
             try {
                 List<ArchiveFileTreeElement> archiveElements = archive.entries.collect {
-                    new ArchiveFileTreeElement(new RelativeArchivePath(it))
+                    newArchiveFileTreeElement(it)
                 }
                 Spec<FileTreeElement> patternSpec = patternSet.getAsSpec()
                 List<ArchiveFileTreeElement> filteredArchiveElements = archiveElements.findAll { ArchiveFileTreeElement archiveElement ->
@@ -267,6 +270,12 @@ class ShadowCopyAction implements CopyAction {
                 archive.close()
             }
             stats.finishJar()
+        }
+
+        private ArchiveFileTreeElement newArchiveFileTreeElement(ZipEntry it) {
+            GradleVersion.current().compareTo(GradleVersion.version("8.3")) >= 0 ?
+                    new ArchiveFileTreeElement(new RelativeArchivePath(it)) :
+            new ArchiveFileTreeElement(new RelativeArchivePath(it))
         }
 
         private void visitArchiveDirectory(RelativeArchivePath archiveDir) {
@@ -400,7 +409,7 @@ class ShadowCopyAction implements CopyAction {
                 String path = dirDetails.relativePath.pathString + '/'
                 ZipEntry archiveEntry = new ZipEntry(path)
                 archiveEntry.setTime(getArchiveTimeFor(dirDetails.lastModified))
-                archiveEntry.unixMode = (UnixStat.DIR_FLAG | dirDetails.mode)
+                archiveEntry.unixMode = (UnixStat.DIR_FLAG | unixPermissionResolver.apply(dirDetails))
                 zipOutStr.putNextEntry(archiveEntry)
                 zipOutStr.closeEntry()
                 recordVisit(dirDetails.relativePath)
@@ -463,9 +472,21 @@ class ShadowCopyAction implements CopyAction {
         }
     }
 
+    class ArchiveFileTreeElement83 extends ArchiveFileTreeElement {
+
+        ArchiveFileTreeElement83(RelativeArchivePath archivePath) {
+            super(archivePath);
+        }
+
+        @Override
+        FilePermissions getPermissions() {
+            return org.gradle.api.internal.file.DefaultFilePermissions(archivePath.entry.unixMode)
+        }
+    }
+
     class ArchiveFileTreeElement implements FileTreeElement {
 
-        private final RelativeArchivePath archivePath
+        protected final RelativeArchivePath archivePath
 
         ArchiveFileTreeElement(RelativeArchivePath archivePath) {
             this.archivePath = archivePath
@@ -528,6 +549,11 @@ class ShadowCopyAction implements CopyAction {
         @Override
         int getMode() {
             return archivePath.entry.unixMode
+        }
+
+        @Override
+        FilePermissions getPermissions() {
+            return new DefaultFilePermissions(archivePath.entry.unixMode)
         }
 
         FileTreeElement asFileTreeElement() {

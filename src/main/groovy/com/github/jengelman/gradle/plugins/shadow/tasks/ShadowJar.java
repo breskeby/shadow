@@ -10,12 +10,14 @@ import org.gradle.api.Action;
 import org.gradle.api.file.ConfigurableFileCollection;
 import org.gradle.api.file.DuplicatesStrategy;
 import org.gradle.api.file.FileCollection;
+import org.gradle.api.file.FileCopyDetails;
 import org.gradle.api.internal.DocumentationRegistry;
 import org.gradle.api.internal.file.FileResolver;
 import org.gradle.api.internal.file.copy.CopyAction;
 import org.gradle.api.tasks.*;
 import org.gradle.api.tasks.bundling.Jar;
 import org.gradle.api.tasks.util.PatternSet;
+import org.gradle.util.GradleVersion;
 import org.jetbrains.annotations.NotNull;
 
 import java.io.File;
@@ -23,6 +25,7 @@ import java.lang.reflect.InvocationTargetException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Callable;
+import java.util.function.Function;
 
 @CacheableTask
 public class ShadowJar extends Jar implements ShadowSpec {
@@ -106,7 +109,13 @@ public class ShadowJar extends Jar implements ShadowSpec {
         final UnusedTracker unusedTracker = minimizeJar ? UnusedTracker.forProject(getApiJars(), getSourceSetsClassesDirs().getFiles(), getToMinimize()) : null;
         return new ShadowCopyAction(getArchiveFile().get().getAsFile(), getInternalCompressor(), documentationRegistry,
                 this.getMetadataCharset(), transformers, relocators, getRootPatternSet(), shadowStats,
-                isPreserveFileTimestamps(), minimizeJar, unusedTracker);
+                isPreserveFileTimestamps(), minimizeJar, unusedTracker, unixPermissionsResolver());
+    }
+
+    private Function<FileCopyDetails, Integer> unixPermissionsResolver() {
+        return GradleVersion.current().compareTo(GradleVersion.version("8.3")) <= 0 ?
+                (fileCopyDetails -> fileCopyDetails.getMode()) :
+                (fileCopyDetails -> fileCopyDetails.getPermissions().toUnixNumeric());
     }
 
     @Classpath
@@ -196,7 +205,8 @@ public class ShadowJar extends Jar implements ShadowSpec {
      * @param clazz the transformer to add. Must have a no-arg constructor
      * @return this
      */
-    public ShadowJar transform(Class<? extends Transformer> clazz) throws InstantiationException, IllegalAccessException, NoSuchMethodException, InvocationTargetException {
+    public ShadowJar transform(Class<? extends Transformer> clazz) throws
+            InstantiationException, IllegalAccessException, NoSuchMethodException, InvocationTargetException {
         return transform(clazz, null);
     }
 
@@ -204,10 +214,11 @@ public class ShadowJar extends Jar implements ShadowSpec {
      * Add a Transformer instance for modifying JAR resources and configure.
      *
      * @param clazz the transformer class to add. Must have no-arg constructor
-     * @param c the configuration for the transformer
+     * @param c     the configuration for the transformer
      * @return this
      */
-    public <T extends Transformer> ShadowJar transform(Class<T> clazz, Action<T> c) throws InstantiationException, IllegalAccessException, NoSuchMethodException, InvocationTargetException {
+    public <T extends Transformer> ShadowJar transform(Class<T> clazz, Action<T> c) throws
+            InstantiationException, IllegalAccessException, NoSuchMethodException, InvocationTargetException {
         T transformer = clazz.getDeclaredConstructor().newInstance();
         addTransform(transformer, c);
         return this;
@@ -309,7 +320,7 @@ public class ShadowJar extends Jar implements ShadowSpec {
     /**
      * Add a class relocator that maps each class in the pattern to the provided destination.
      *
-     * @param pattern the source pattern to relocate
+     * @param pattern     the source pattern to relocate
      * @param destination the destination package
      * @return this
      */
@@ -320,9 +331,9 @@ public class ShadowJar extends Jar implements ShadowSpec {
     /**
      * Add a class relocator that maps each class in the pattern to the provided destination.
      *
-     * @param pattern the source pattern to relocate
+     * @param pattern     the source pattern to relocate
      * @param destination the destination package
-     * @param configure the configuration of the relocator
+     * @param configure   the configuration of the relocator
      * @return this
      */
     public ShadowJar relocate(String pattern, String destination, Action<SimpleRelocator> configure) {
@@ -348,7 +359,8 @@ public class ShadowJar extends Jar implements ShadowSpec {
      * @param relocatorClass the relocator class to add. Must have a no-arg constructor.
      * @return this
      */
-    public ShadowJar relocate(Class<? extends Relocator> relocatorClass) throws InstantiationException, IllegalAccessException, NoSuchMethodException, InvocationTargetException {
+    public ShadowJar relocate(Class<? extends Relocator> relocatorClass) throws
+            InstantiationException, IllegalAccessException, NoSuchMethodException, InvocationTargetException {
         return relocate(relocatorClass, null);
     }
 
@@ -364,10 +376,11 @@ public class ShadowJar extends Jar implements ShadowSpec {
      * Add a relocator of the provided class and configure.
      *
      * @param relocatorClass the relocator class to add. Must have a no-arg constructor
-     * @param configure the configuration for the relocator
+     * @param configure      the configuration for the relocator
      * @return this
      */
-    public <R extends Relocator> ShadowJar relocate(Class<R> relocatorClass, Action<R> configure) throws InstantiationException, IllegalAccessException, NoSuchMethodException, InvocationTargetException {
+    public <R extends Relocator> ShadowJar relocate(Class<R> relocatorClass, Action<R> configure) throws
+            InstantiationException, IllegalAccessException, NoSuchMethodException, InvocationTargetException {
         R relocator = relocatorClass.getDeclaredConstructor().newInstance();
         addRelocator(relocator, configure);
         return this;
@@ -395,7 +408,8 @@ public class ShadowJar extends Jar implements ShadowSpec {
         this.relocators = relocators;
     }
 
-    @Classpath @Optional
+    @Classpath
+    @Optional
     public List<FileCollection> getConfigurations() {
         return this.configurations;
     }
