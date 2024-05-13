@@ -58,7 +58,7 @@ tasks.named('shadowJar', ShadowJar) {
 
 idea {
     project {
-        languageLevel = '1.8'
+        languageLevel = '17'
     }
 }
 
